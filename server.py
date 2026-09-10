@@ -1,23 +1,26 @@
 """reCHUCKit web/API entry point.
 
 Serves the browser UI and runs the first usable end-to-end V1 pipeline:
-upload -> audio analysis -> non-destructive MIDI cleanup -> DAW export ZIP.
+upload -> analysis -> MIDI cleanup -> role/drum intelligence -> scoring -> DAW ZIP.
 """
 from __future__ import annotations
 
+import json
 from dataclasses import asdict
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Annotated
 from uuid import uuid4
-import json
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 
-from engine.audio_analyzer import analyze_audio
+from engine.audio_analyzer import AudioFeatures, analyze_audio
+from engine.drum_engine import analyze_drums
 from engine.exporter import export_session
 from engine.midi_engine import process as process_midi
+from engine.role_engine import detect_role
+from engine.scoring import score_structure
 
 ROOT = Path(__file__).resolve().parent
 EXPORT_ROOT = ROOT / "exports"
@@ -69,6 +72,26 @@ def _public_midi_report(report: dict) -> dict:
     if "output" in clean:
         clean["output"] = Path(clean["output"]).name
     return clean
+
+
+def _analyze_audio(path: Path) -> AudioFeatures:
+    try:
+        return analyze_audio(path)
+    except Exception as exc:
+        raise HTTPException(422, f"Could not analyze audio file {path.name}: {exc}") from exc
+
+
+def _process_midi(path: Path, output_dir: Path, timing: float, velocity: float, humanize: float) -> dict:
+    try:
+        return process_midi(
+            str(path),
+            str(output_dir),
+            timing_strength=timing,
+            velocity_strength=velocity,
+            humanize_strength=humanize,
+        )
+    except Exception as exc:
+        raise HTTPException(422, f"Could not process MIDI file {path.name}: {exc}") from exc
 
 
 @app.get("/")
@@ -153,25 +176,30 @@ async def rebuild(
             )
 
         analysis: dict = {"reference": None, "stems": [], "midi": []}
+        reference_features: AudioFeatures | None = None
         if reference_path:
-            analysis["reference"] = asdict(analyze_audio(reference_path))
+            reference_features = _analyze_audio(reference_path)
+            analysis["reference"] = asdict(reference_features)
             analysis["reference"]["file"] = Path(analysis["reference"]["file"]).name
+
         for path in stem_paths:
-            features = asdict(analyze_audio(path))
+            features = asdict(_analyze_audio(path))
             features["file"] = Path(features["file"]).name
             analysis["stems"].append(features)
 
         corrected_midi: list[Path] = []
         for path in midi_paths:
-            result = process_midi(
-                str(path),
-                str(processed_dir),
-                timing_strength=timing,
-                velocity_strength=velocity,
-                humanize_strength=humanize,
-            )
+            result = _process_midi(path, processed_dir, timing, velocity, humanize)
             corrected_midi.append(Path(result["output"]))
-            analysis["midi"].append(_public_midi_report(result))
+            midi_report = _public_midi_report(result)
+            midi_report["role"] = asdict(detect_role(path))
+            drum_report = analyze_drums(path)
+            midi_report["drums"] = asdict(drum_report)
+            if reference_features is not None and not drum_report.is_drum_track:
+                midi_report["structural_score"] = asdict(score_structure(reference_features, path))
+            else:
+                midi_report["structural_score"] = None
+            analysis["midi"].append(midi_report)
 
         report = {
             "job_id": job_id,
@@ -182,8 +210,8 @@ async def rebuild(
                 "source_files_modified": False,
                 "automatic_pitch_corrections_applied": False,
                 "note": (
-                    "V1 applies timing/velocity cleanup only. Pitch/note proposals remain "
-                    "review-gated until confidence validation is wired into the pipeline."
+                    "Timing/velocity cleanup is active. Role and drum detection are confidence-scored. "
+                    "Pitch/note changes remain review-gated; structural scores do not claim timbre matching."
                 ),
             },
         }
