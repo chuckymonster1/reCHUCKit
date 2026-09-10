@@ -11,7 +11,6 @@ from tempfile import TemporaryDirectory
 from typing import Annotated
 from uuid import uuid4
 import json
-import shutil
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
@@ -49,7 +48,10 @@ async def _save_upload(upload: UploadFile, destination: Path, allowed: set[str])
             while chunk := await upload.read(CHUNK_BYTES):
                 size += len(chunk)
                 if size > MAX_FILE_BYTES:
-                    raise HTTPException(413, f"File is larger than {MAX_FILE_BYTES // (1024*1024)} MB")
+                    raise HTTPException(
+                        413,
+                        f"File is larger than {MAX_FILE_BYTES // (1024 * 1024)} MB",
+                    )
                 handle.write(chunk)
     finally:
         await upload.close()
@@ -102,13 +104,18 @@ async def rebuild(
     midi = midi or []
     if reference is None and not stems and not midi:
         raise HTTPException(400, "Upload a reference mix, stems, or MIDI first.")
-    for value, label in ((humanize, "humanize"), (timing, "timing"), (velocity, "velocity")):
+    for value, label in (
+        (humanize, "humanize"),
+        (timing, "timing"),
+        (velocity, "velocity"),
+    ):
         if not 0 <= value <= 1:
             raise HTTPException(422, f"{label} must be between 0 and 1")
 
     job_id = uuid4().hex
     EXPORT_ROOT.mkdir(parents=True, exist_ok=True)
-    session_name = Path((reference.filename if reference else (midi[0].filename if midi else stems[0].filename)) or "session").stem
+    first_name = reference.filename if reference else (midi[0].filename if midi else stems[0].filename)
+    session_name = Path(first_name or "session").stem
 
     with TemporaryDirectory(prefix="rechuckit-") as temp:
         work = Path(temp)
@@ -119,15 +126,31 @@ async def rebuild(
 
         reference_path: Path | None = None
         if reference is not None:
-            reference_path = await _save_upload(reference, upload_dir / f"reference_{_safe_name(reference.filename or 'mix.wav')}", ALLOWED_AUDIO)
+            reference_path = await _save_upload(
+                reference,
+                upload_dir / f"reference_{_safe_name(reference.filename or 'mix.wav')}",
+                ALLOWED_AUDIO,
+            )
 
         stem_paths: list[Path] = []
         for index, item in enumerate(stems, 1):
-            stem_paths.append(await _save_upload(item, upload_dir / f"stem_{index:02d}_{_safe_name(item.filename or 'stem.wav')}", ALLOWED_AUDIO))
+            stem_paths.append(
+                await _save_upload(
+                    item,
+                    upload_dir / f"stem_{index:02d}_{_safe_name(item.filename or 'stem.wav')}",
+                    ALLOWED_AUDIO,
+                )
+            )
 
         midi_paths: list[Path] = []
         for index, item in enumerate(midi, 1):
-            midi_paths.append(await _save_upload(item, upload_dir / f"midi_{index:02d}_{_safe_name(item.filename or 'track.mid')}", ALLOWED_MIDI))
+            midi_paths.append(
+                await _save_upload(
+                    item,
+                    upload_dir / f"midi_{index:02d}_{_safe_name(item.filename or 'track.mid')}",
+                    ALLOWED_MIDI,
+                )
+            )
 
         analysis: dict = {"reference": None, "stems": [], "midi": []}
         if reference_path:
@@ -145,6 +168,7 @@ async def rebuild(
                 str(processed_dir),
                 timing_strength=timing,
                 velocity_strength=velocity,
+                humanize_strength=humanize,
             )
             corrected_midi.append(Path(result["output"]))
             analysis["midi"].append(_public_midi_report(result))
@@ -157,13 +181,16 @@ async def rebuild(
             "safety": {
                 "source_files_modified": False,
                 "automatic_pitch_corrections_applied": False,
-                "note": "V1 applies timing/velocity cleanup only. Pitch/note proposals remain review-gated until confidence validation is wired into the pipeline.",
+                "note": (
+                    "V1 applies timing/velocity cleanup only. Pitch/note proposals remain "
+                    "review-gated until confidence validation is wired into the pipeline."
+                ),
             },
         }
 
         job_dir = EXPORT_ROOT / job_id
         job_dir.mkdir()
-        zip_path = export_session(
+        export_session(
             session_name=session_name,
             output_dir=job_dir,
             corrected_midi=corrected_midi,
