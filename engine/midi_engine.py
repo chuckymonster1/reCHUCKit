@@ -93,7 +93,7 @@ def _cleanup_track(
         if event["msg"].type == "note_on" and event["msg"].velocity > 0
     ]
     velocities = [events[i]["msg"].velocity for i in note_on_indices]
-    velocity_center = float(median(velocities)) if velocities else 82.0
+    velocity_center = float(median(velocities)) if len(velocities) >= 3 else 82.0
 
     active: dict[tuple[int, int], deque[int]] = defaultdict(deque)
     pairs: list[tuple[int, int]] = []
