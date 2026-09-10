@@ -25,6 +25,10 @@ dev = [
   "ruff>=0.6,<1",
 ]
 
+[tool.setuptools]
+packages = ["engine"]
+py-modules = ["server"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
